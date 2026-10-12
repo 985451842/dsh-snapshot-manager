@@ -15,7 +15,7 @@ param(
     [Parameter(ParameterSetName = 'Dev')][switch]$DevFromWorkspace,
     [Parameter(ParameterSetName = 'Release')][switch]$Release,
     [switch]$SkipPatch,
-    [string]$DevChannelDir = 'D:/javaProject/yf/.dsh-probe/plugin-dev'
+    [string]$DevChannelDir = 'D:/javaProject/dsh/.dsh-probe/plugin-dev'
 )
 
 $ErrorActionPreference = 'Stop'
