@@ -1,6 +1,6 @@
 {
   "name": "dsh-snapshot-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "description": "会话快照 / 回滚 + 归档列表（DeepSeek Harness 插件）：按轮次采集工作区快照，一键把文件与对话回退到某一轮之前，并在设置里管理归档会话。",
   "type": "module",
@@ -10,7 +10,15 @@
     "type": "git",
     "url": "git+https://github.com/985451842/dsh-snapshot-manager.git"
   },
-  "keywords": ["deepseek", "harness", "dsh", "dsh-plugin", "snapshot", "rollback", "archive"],
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "snapshot",
+    "rollback",
+    "archive"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
