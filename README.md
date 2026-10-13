@@ -116,7 +116,7 @@ $DSH_HOME/snapshot-manager/
 | GET | `/snapshots?sessionId=` | 快照时间线 |
 | GET | `/preview?sessionId=&snapshotId=` | 干跑预览（将恢复/删除哪些文件、对话切点） |
 | POST | `/restore` | `{sessionId, snapshotId, files, scope, conversation, promptText, dryRun}`（`scope` 取 `'all'`（默认）或 `'session'`） |
-| POST | `/capture` | 手动打快照 |
+| POST | `/capture` | 手动打快照：`{sessionId, label?}`。**不需要传 cwd** —— 客户端只发 sessionId，工作目录由 Host 解析 |
 | DELETE | `/snapshot?sessionId=&snapshotId=` | 删除某条快照 |
 | GET | `/archived` | 归档会话列表 |
 | GET | `/searchArchived?q=` | 在归档会话里搜索 |
@@ -203,6 +203,19 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
   保证正在跑的这一轮也有还原点。
 - **旧模型的"结果"快照**（`phase: 'end'`）不再新增也不再展示；历史记录仍留在库里（回滚时按轮号兜底可见）。
 - **手动**（`phase: 'manual'`）与**回滚前**（`phase: 'pre-rollback'`）不受影响。
+
+### 工作目录是怎么解析出来的
+
+自动采集拿到的是 DSH 给的真实 Session，`header.cwd` 天然存在；但**手动打快照、预览、回滚**只有
+`sessionId`，所以 Host 按下面顺序解析工作目录（`resolveSessionCwd`）：
+
+1. **缓存**：采集过、或见过该会话事件时记下的 `header.cwd`（事件监听里顺手缓存）。
+2. **`sessionController.inspect(sessionId)`**：读持久化的会话 header（不激活 Agent），
+   供"插件还没见过这个会话"的情况兜底。
+3. 都拿不到才报错，且给的是可操作提示：「请先在这个会话里发一条消息（让插件看到它的工作区）」。
+
+> 早期版本由客户端在 `POST /capture` 里带 `cwd`，客户端只发 `sessionId` 时就会失败并弹出
+> 「该会话没有工作目录，跳过采集」。现在 cwd 一律由 Host 解析，客户端不必也不应传路径。
 
 ### 文件恢复范围：全量 / 只恢复本次会话修改的文件
 
