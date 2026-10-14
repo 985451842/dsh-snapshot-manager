@@ -1,8 +1,8 @@
 {
   "name": "dsh-snapshot-manager",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "private": false,
-  "description": "会话快照 / 回滚 + 归档列表（DeepSeek Harness 插件）：按轮次采集工作区快照，一键把文件与对话回退到某一轮之前，并在设置里管理归档会话。",
+  "description": "会话快照 / 回滚（DeepSeek Harness 插件）：按轮次采集工作区快照，一键把文件与对话回退到某一轮之前。",
   "type": "module",
   "main": "lib/host.js",
   "license": "MIT",
@@ -16,8 +16,7 @@
     "dsh",
     "dsh-plugin",
     "snapshot",
-    "rollback",
-    "archive"
+    "rollback"
   ],
   "dsh": {
     "bundle": {

@@ -1,10 +1,10 @@
 # dsh-snapshot-manager
 
-DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚** + **归档会话管理**。
+DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 
 - 每个轮次**开始前**自动对工作区做一次**增量文件快照**（内容寻址存储，同一内容只存一份）——回滚语义统一为"回到本轮之前"，所以每轮只留一条快照。
 - 发现连续对话最后结果不对时，可以从任一快照**回滚**：文件恢复 + 通过 `sessionController.fork(atSeq)` 把对话退回到该时点（原会话完整保留），并可把**编辑后的输入**自动发进新会话继续。
-- **归档列表**在「设置」里：归档会话的列表 / 关键词搜索 / 取消归档 / **删除**（回收站，可还原）/ **物理删除**（连带清掉该会话的快照记录），另有回收站与快照垃圾清理。
+- 快照库维护：面板右上角「**清理快照垃圾**」删除孤立快照（会话日志已不存在）、回收没有任何快照引用的内容对象，并归并历史遗留的非规范化工作区索引 key。
 
 纯 JavaScript，无构建步骤；Host 半边只用 Node 内置模块（不 import 任何 `@deepseek-ai/*` 包），Client 半边是手写的 `window.__ModuleLoader__` bundle。
 
@@ -100,15 +100,13 @@ $DSH_HOME/snapshot-manager/
   index/<workspaceKey>.json      工作区扫描索引：relPath -> {size, mtimeMs, hash}
   objects/<h2>/<hash>            文件内容对象（内容寻址，天然去重）
   sessions/<sessionId>/<id>.json 快照记录：{phase, turn, seq, forkSeq, parent, full, changes}
-  trash/<folder>/                回收站里的会话日志目录
-  trash/index.json               回收站清单
 ```
 
 快照只存"与上一个快照的差异"，`checkpointEvery` 个之后写一次全量；还原时沿链回溯即可得到任意时点的完整路径表。
 
 ## HTTP 接口
 
-都注册在 DSH 已鉴权的共享 fetch 通道上（`ctx.connection.fetch.register`），前缀 `/api/snapshot-manager/v2`：
+都注册在 DSH 已鉴权的共享 fetch 通道上（`ctx.connection.fetch.register`），前缀 `/api/snapshot-manager/v3`：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -118,67 +116,30 @@ $DSH_HOME/snapshot-manager/
 | POST | `/restore` | `{sessionId, snapshotId, files, scope, conversation, promptText, dryRun}`（`scope` 取 `'all'`（默认）或 `'session'`） |
 | POST | `/capture` | 手动打快照：`{sessionId, label?}`。**不需要传 cwd** —— 客户端只发 sessionId，工作目录由 Host 解析 |
 | DELETE | `/snapshot?sessionId=&snapshotId=` | 删除某条快照 |
-| GET | `/archived` | 归档会话列表 |
-| GET | `/searchArchived?q=` | 在归档会话里搜索 |
-| GET | `/transcript?sessionId=&limit=` | 只读对话记录 |
-| POST | `/archive`、`/unarchive` | 归档 / 取消归档 |
-| GET/POST | `/trash` | 回收站列表 / 移入回收站（可还原） |
-| POST | `/trash/restore`、`/trash/purge` | 还原 / 彻底删除回收站条目 |
-| POST | `/delete` | **物理删除**：`{sessionId, confirm:true, force?}`，日志直接从磁盘抹掉（连带该会话的快照记录） |
-| POST | `/pruneArchived` | **物理清理归档标记**：移除"日志已不存在"的残留归档标记 |
-| POST | `/pruneSnapshots` | 删除孤立快照（会话已不存在且不在回收站）+ 归并遗留的工作区索引 key |
+| POST | `/pruneSnapshots` | 删除孤立快照（会话日志已不存在）+ 归并遗留的工作区索引 key |
 | POST | `/gc` | 回收没有任何快照记录引用的内容对象 |
-| GET | `/diagnose?sessionId=` | 诊断：该会话还被哪些地方记着（归档集合 / 工作区记账 / 持久化 / 内存 Agent / 控制器行） |
 | GET | `/beacon` | 客户端挂载信标（诊断用） |
 
-## 删除会话的三档语义
+## 维护
 
-DSH **没有**删除会话的官方 API，所以这里明确分成三档，按需要挑：
-
-| 操作 | 归档标记 | 日志文件 | 可恢复性 |
-|---|---|---|---|
-| 删除（移入回收站） | **物理移除** | 移到 `trash/<folder>/` | 可还原到原位置 |
-| 彻底删除（回收站内） | 再次确保移除 | 从 `trash/` 抹掉 | 不可恢复 |
-| **物理删除**（归档列表里一步到位） | **物理移除** | **直接从 `sessions/` 抹掉** | 不可恢复 |
-
-三档都会同时解除工作区记账、清掉投影缓存；**物理删除**还会连带删掉该会话自己的快照记录。
-
-### 维护
-
-界面上「🗂 归档」面板右上角有 **清理快照垃圾**，等价于依次调用：
+快照面板右上角有 **清理快照垃圾**，等价于依次调用：
 
 ```
-POST /pruneSnapshots   # 删除孤立快照（会话已不存在且不在回收站）+ 归并遗留的工作区索引 key
+POST /pruneSnapshots   # 删除孤立快照（会话日志已不存在）+ 归并遗留的工作区索引 key
 POST /gc               # 回收没有任何快照记录引用的内容对象
 ```
 
 工作区索引 key 由**规范化路径**（`path.resolve`）生成，并在每次插件挂载时自愈归并——
 所以 `D:\a\b` 与 `D:/a/b` 不会再分裂成两把 key（否则回滚会拿错基线）。
 
-**一个重要副作用（官方限制，不是本插件的 bug）**：如果某个会话此刻仍以 Agent 形式**加载在内存里**，
-那么即使日志、标记、记账都清干净了，客户端的会话列表仍会记得它，直到该会话被卸载或**重启应用**。
-原因：`Agent` 接口只有 `{ id }`，没有任何释放方法；`AgentHandle.dispose()` 属于创建者（agent loop），
-第三方插件拿不到。`/diagnose` 可以确认到底是不是这个原因：
-
-```jsonc
-// GET /api/snapshot-manager/v3/diagnose?sessionId=session-xxxx
-{
-  "inArchivedSet": false, "inWorkspaceAccounting": [], "inPersistence": false,
-  "liveAgent": true,                    // ← 若为 true，列表里的那一行就来自这里
-  "controllerRow": { "running": false, "agentAvailable": true },
-  "logDir": null
-}
-```
-
-
 ## 界面入口
 
 | 位置 | 内容 |
 |---|---|
 | 会话头部 | 「⏱ 快照」时间线面板 |
-| **设置 → 归档列表** | 归档会话管理器（注册在 `settings.section`，`id: snapshot-archive`，默认排在第 30 位）：搜索 / 取消归档 / 删除（回收站）/ 物理删除，含回收站与快照垃圾清理 |
 | 每轮对话尾部 | 「✎ 编辑并重来」（打开时间线面板并展开本轮那条快照的回滚视图） |
 | 快照面板行内 | 回滚…（展开后：☑ 恢复文件 → 可选「只恢复本次会话修改的文件」、☑ 回退对话、可选把输入发进新会话）/ 删除 |
+| 快照面板右上角 | 「清理快照垃圾」（孤立快照 + 无引用对象 + 索引 key 归并） |
 
 ## 快照模型：每轮一条
 
@@ -188,16 +149,29 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 
 ### 位置锚点：锚在提问上，不是 turn/start 上
 
-采集时机是 `turn/start`（此刻文件还是本轮改动之前的干净状态），但**时间线上的位置**锚在紧随其后的
-`user/message` 上。原因是 `turn/start` 比 `user/message` 早几个事件（实测 seq 282 vs 285，中间夹着
+采集时机是 `turn/start`（此刻文件还是本轮改动之前的干净状态），但**位置与说明**都锚在紧随其后的
+那条**真实用户提问**上。原因是 `turn/start` 比提问早几个事件（实测 seq 282 vs 285，中间夹着
 `agent/inbox/spliced`）；若直接用 `turn/start` 的 seq，快照会显示在「上一轮回复之后、本次提问之前」，
 既不是提问起点也不是上一轮终点。
 
-因此一条起点快照记录两个位置，含义不同：
+判定「真实提问」看 `data.source.kind === 'user'`：DSH 会在轮次前后注入大量同样是 `user/message` 的
+消息（`runtime-context`、`skill-catalog`、`agent-instructions`、`tool-jobs`、`subagent-settled`、
+`plugin`、`goal`…，本机 1000+ 条里只有 835 条是 `user`）。这些不是"用户在问什么"，绝不能拿来当
+本轮提问——否则首个快照没有说明（列表里显示「—」），后续快照的说明会变成上一轮提问甚至
+"Current runtime context. …" 这类注入文本。同一轮里若有多条真实提问（排队输入、追加指令），
+以**第一条**代表本轮。
+
+因此一条起点快照记录两个位置 + 一个说明，含义不同：
 
 - `seq`：本次提问的序号——**时间线显示位置**（"从这里开始问的"）。
+- `label`：本次提问的文本——列表里的「说明」，也是「编辑并重来」的预填文本。
 - `forkSeq`：本轮之前最后一次 `turn/end`——**对话回退切点**。回滚 fork 出的新会话保留到 `forkSeq` 为止，
   即**不包含**本次提问，所以你可以在新会话里改完再发。
+
+打开面板（`GET /snapshots`）或做回滚预览（`GET /preview`）时，会对该会话做一次
+**起点快照锚点/说明自愈**（`repairStartLabels`，每代只做一次，幂等）：按 `turn/start` 切分轮次，
+把每条 `start` 快照的 `seq`/`label` 修正到该轮第一条真实提问上。判定不靠猜——轮号对不上、
+或 seq 与任何提问都不相等时一律跳过，绝不用"上一条提问"顶替。
 
 - **基线**（`phase: 'baseline'`）：仅当插件在某会话中途才挂上、该会话一条记录都没有时补一条，
   保证正在跑的这一轮也有还原点。
@@ -263,12 +237,6 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 - 回滚**只处理快照跟踪过的路径**：被排除目录（`node_modules`、`target`、`.git` 等）与从未纳入快照的文件绝不触碰。
 - "快照之后新建的文件"会在回滚时被删除（这正是"回到那一刻"的语义）；预览会明确列出，确认后才执行。
 - 回滚对话采用 **fork 新会话**，DSH 的会话日志是只追加的，不支持就地截断或改写历史；原会话始终保留。
-- 删除会话属于带外维护（官方没有删除 API）：本插件默认**先移入回收站**（可还原），
-  也提供**一步物理删除**；两者都会物理移除归档标记。「彻底删除」与「物理删除」需二次确认，
-  运行中的会话会被拒绝删除。
-- **删掉后列表里可能仍有那一行**：只要该会话还以 Agent 形式加载在内存里，客户端就会记得它
-  （`Agent` 没有任何释放接口，第三方插件无法强制卸载）。刷新页面或重启应用后消失；
-  用 `/diagnose` 可确认。日志、归档标记、工作区记账、投影缓存都已真正清除。
 - 首次采集是整工作区基线（本仓库实测约 1800 个文件、扫描+哈希约 1 秒、落盘约 5 秒）；
   之后每轮增量为 0.2～1 秒（只哈希真正变化的文件）。
 - 需要模型继续生成时，若账号额度不足，新会话的回合会以 provider 错误结束——那是模型侧问题，与插件无关。
