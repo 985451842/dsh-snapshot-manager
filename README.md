@@ -8,6 +8,18 @@ DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 
 纯 JavaScript，无构建步骤；Host 半边只用 Node 内置模块（不 import 任何 `@deepseek-ai/*` 包），Client 半边是手写的 `window.__ModuleLoader__` bundle。
 
+## 0.3.0 重点变更
+
+这一版按可靠性审计做了一轮整体加固，升级后**必须重启应用或禁用/启用一次插件**让 Host 重新加载。
+
+- **快照链完整性**：`trim` 删除最老记录前，会先把新的最老记录提升为 `full` 基座；手动删除只允许删叶子，拒绝删还有子记录的基线。`resolveTree` 现在区分“完整树”和“残缺树”，残缺链直接拒绝回滚，避免把大量文件误判成“快照之后新建”而删除。
+- **一次一令牌 + 二次确认**：`/preview` 签发 5 分钟有效、只能用一次的 `planToken`，并绑定完整计划摘要。执行前客户端要求再确认一次；预览之后清单变了（新增/删除文件、目录变化），令牌校验会失败并要求重新预览。执行始终使用完整清单，不再受 HTTP 展示上限 500 条影响。
+- **回滚事务日志与中断恢复**：每次文件回滚写 `restore/<tx>.json`，记录 `in-progress`/`done`/`partial`/`failed`。进程中途退出后重启会把残留事务标成 `interrupted`，面板顶部出现恢复入口：可以继续还原目标，或回到回滚前恢复点。写文件改为同目录临时文件 + fsync + rename，对象写入也会校验内容哈希。
+- **撤销回滚**：时间线里的“回滚前”记录现在有“撤销这次回滚…”入口，默认只恢复文件、不重复 fork 对话；回滚报告会显示恢复点、事务 id、失败明细与警告，不再在新会话创建后把报告清空。
+- **跨会话正确性**：增量快照改为相对“本会话上一条快照”的树，而不是全局工作区索引；采集、手动采集、预览、回滚都按工作区串行化，多个会话共用同一 cwd 时不会互相漏文件。
+- **边界提示**：扫描会统计符号链接/junction、排除项、超大文件、不可读项和 `.git` 目录，并在预览里提示“这些不会回滚”；回滚写入前做 `realpath` 校验，拒绝通过目录链接写到工作区外；会话 cwd 变化会更新缓存，跨 cwd 的对话回退会被跳过并提示。
+- **已知仍不完整**：`journal`（只恢复本会话修改的文件）仍只认 `write`/`edit`/`str_replace_editor`，经终端/构建/子代理的改动不在其中；`.git` 的提交、分支、索引状态仍不参与回滚；权限、可执行位、mtime 等元数据不恢复。这些会在预览里明确提示，但不会假装已覆盖。
+
 ## 安装
 
 ### 方式一：官方插件命令（推荐）
@@ -99,23 +111,29 @@ pwsh -File install.ps1 -DevFromWorkspace
 $DSH_HOME/snapshot-manager/
   index/<workspaceKey>.json      工作区扫描索引：relPath -> {size, mtimeMs, hash}
   objects/<h2>/<hash>            文件内容对象（内容寻址，天然去重）
-  sessions/<sessionId>/<id>.json 快照记录：{phase, turn, seq, forkSeq, parent, full, changes}
+  sessions/<sessionId>/<id>.json 快照记录：{phase, turn, seq, forkSeq, parent, full, changes, window, rollbackOf?}
+  journal/<sessionId>.jsonl      本会话 write/edit 过的路径（“只恢复本次会话修改的文件”）
+  restore/<tx>.json              回滚事务日志：in-progress/interrupted/done/partial/failed
 ```
 
-快照只存"与上一个快照的差异"，`checkpointEvery` 个之后写一次全量；还原时沿链回溯即可得到任意时点的完整路径表。
+快照只存“与上一个快照的差异”，`checkpointEvery` 个之后写一次全量；还原时沿链回溯即可得到任意时点的完整路径表。
+当记录数超过 `maxSnapshotsPerSession`，修剪会先把新的最老记录提升为 `full` 基座，再删除更老的记录，
+因此保留窗口内的每条链都能独立解析；链本身不完整时宁可不修剪，也不会继续删。
 
 ## HTTP 接口
 
-都注册在 DSH 已鉴权的共享 fetch 通道上（`ctx.connection.fetch.register`），前缀 `/api/snapshot-manager/v3`：
+都注册在 DSH 已鉴权的共享 fetch 通道上（`ctx.connection.fetch.register`），前缀 `/api/snapshot-manager/v4`：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/ping`、`/status` | 自检 |
-| GET | `/snapshots?sessionId=` | 快照时间线 |
-| GET | `/preview?sessionId=&snapshotId=` | 干跑预览（将恢复/删除哪些文件、对话切点） |
-| POST | `/restore` | `{sessionId, snapshotId, files, scope, conversation, promptText, dryRun}`（`scope` 取 `'all'`（默认）或 `'session'`） |
+| GET | `/snapshots?sessionId=` | 快照时间线（含 `windowRisk`、`rollbackOf`、`chainRepaired`） |
+| GET | `/preview?sessionId=&snapshotId=` | 干跑预览（恢复/删除清单、未跟踪项、警告），返回一次性 `planToken` |
+| POST | `/restore` | `{sessionId, snapshotId, files, scope, conversation, promptText, planToken, dryRun}`（`scope` 取 `'all'`（默认）或 `'session'`；非 dryRun 必须带 `planToken`） |
 | POST | `/capture` | 手动打快照：`{sessionId, label?}`。**不需要传 cwd** —— 客户端只发 sessionId，工作目录由 Host 解析 |
-| DELETE | `/snapshot?sessionId=&snapshotId=` | 删除某条快照 |
+| DELETE | `/snapshot?sessionId=&snapshotId=` | 删除某条快照。只允许删叶子；有子记录的基线会被拒绝 |
+| GET | `/recoveries?sessionId=` | 列出 `in-progress`/`interrupted`/`partial`/`failed` 的回滚事务 |
+| POST | `/recover` | `{id, action: 'resume' \| 'revert'}`：继续还原目标，或回到回滚前恢复点 |
 | POST | `/pruneSnapshots` | 删除孤立快照（会话日志已不存在）+ 归并遗留的工作区索引 key |
 | POST | `/gc` | 回收没有任何快照记录引用的内容对象 |
 | GET | `/beacon` | 客户端挂载信标（诊断用） |
@@ -138,7 +156,9 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 |---|---|
 | 会话头部 | 「⏱ 快照」时间线面板 |
 | 每轮对话尾部 | 「✎ 编辑并重来」（打开时间线面板并展开本轮那条快照的回滚视图） |
-| 快照面板行内 | 回滚…（展开后：☑ 恢复文件 → 可选「只恢复本次会话修改的文件」、☑ 回退对话、可选把输入发进新会话）/ 删除 |
+| 快照面板行内 | 回滚…（展开后：☑ 恢复文件 → 可选「只恢复本次会话修改的文件」、☑ 回退对话、可选把输入发进新会话；再点一次「确认执行」才真正执行）/ 删除（只允许删叶子） |
+| 「回滚前」行 | 「撤销这次回滚…」：默认只恢复文件、不重复 fork 对话 |
+| 面板顶部 | 中断/部分失败的回滚事务：继续还原目标 / 回到回滚前 |
 | 快照面板右上角 | 「清理快照垃圾」（孤立快照 + 无引用对象 + 索引 key 归并） |
 
 ## 快照模型：每轮一条
@@ -258,12 +278,20 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 ## 安全边界与已知限制
 
 - 回滚**只处理快照跟踪过的路径**：被排除目录（`node_modules`、`target`、`.git` 等）与从未纳入快照的文件绝不触碰。
-- "快照之后新建的文件"会在回滚时被删除（这正是"回到那一刻"的语义）；预览会明确列出，确认后才执行。
+- "快照之后新建的文件"会在回滚时被删除（这正是"回到那一刻"的语义）；预览会明确列出，**二次确认**后才执行。
+- 预览会统计符号链接/junction、排除项、超大文件、不可读项和 `.git` 目录；这些不会回滚，面板会提示。回滚写入前
+  还会做 `realpath` 校验，目标路径的最近已存在祖先必须在工作区内；写操作拒绝目标是符号链接，避免通过目录链接写穿。
 - 目录**只删空的**，且只删"快照时点并不存在"的目录；非空目录（含被排除内容、或本次范围不删的残留）
   一律保留，不会递归删除目录里的东西。
 - 回滚对话采用 **fork 新会话**，DSH 的会话日志是只追加的，不支持就地截断或改写历史；原会话始终保留。
+  对话回退不能自动撤销；文件回滚可以回到自动生成的 `pre-rollback` 恢复点。
+- 回滚文件先写临时文件再 rename；单个文件失败不会中断整批，但会写入事务日志并在报告里列出失败项。文件有失败时
+  默认跳过对话回退，避免新会话建立在半完成的工作区上。
 - 首次采集是整工作区基线（本仓库实测约 1800 个文件、扫描+哈希约 1 秒、落盘约 5 秒）；
-  之后每轮增量为 0.2～1 秒（只哈希真正变化的文件）。
+  之后每轮增量为 0.2～1 秒（只哈希真正变化的文件）。采集仍是异步扫描，触发到完成之间存在窗口；
+  快照记录会保存 `window.risk`，预览会提示窗口内被修改的文件，但插件不能消除这个窗口。
+- 启动时会探测快照存储根是否可写；不可写时面板会显示“快照存储不可用”的具体原因，而不是静默显示成没有快照。
+- 不恢复文件权限、可执行位、mtime、ACL/ADS 等元数据，只恢复内容与"删除/新建"状态。
 - 需要模型继续生成时，若账号额度不足，新会话的回合会以 provider 错误结束——那是模型侧问题，与插件无关。
 
 ## 开发说明
@@ -271,7 +299,10 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 - `lib/host.js`：Host 半边实现（单文件，避免 `?rev=` 动态 import 时的相对 import 缓存问题）。
 - `lib/bootstrap.js`：仅开发模式使用的稳定入口，按内容哈希 `import('./host.js?rev=…')` 实现改完即生效。
 - `lib/client.js`：浏览器半边（手写 bundle，只用 `react` / `react/jsx-runtime` 两个平台 seed，UI 全部走主题变量）。
-- `test/`：Node 内置 `node:test` 回归测试（`npm test`；若运行环境禁止子进程 spawn，可直接
-  `node test/rel-path.test.mjs` / `node test/journal.test.mjs` 在进程内执行）。
+- `test/`：Node 内置 `node:test` 回归测试。若运行环境禁止子进程 spawn（Windows 沙箱常见），不要用
+  `node --test`，直接逐个文件跑：`node test/chain.test.mjs`、`node test/restore.test.mjs`、
+  `node test/journal.test.mjs`、`node test/rel-path.test.mjs`。
+- `chain.test.mjs` 覆盖残缺链、trim 提升基座、删除保护；`restore.test.mjs` 覆盖完整清单回滚、令牌一次性/
+  计划漂移、跨会话增量、中断事务恢复、目录链接越界拒绝。
 - 代码中以 `DEV-ONLY` 标注的探针、启动标记与开发命令通道，均可安全地随发布副本一起存在：
   它们只在配置显式给出 `devChannelDir` 时才会启用。
