@@ -8,10 +8,11 @@ DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 
 纯 JavaScript，无构建步骤；Host 半边只用 Node 内置模块（不 import 任何 `@deepseek-ai/*` 包），Client 半边是手写的 `window.__ModuleLoader__` bundle。
 
-## 0.3.0 重点变更
+## 0.3.x 重点变更
 
 这一版按可靠性审计做了一轮整体加固，升级后**必须重启应用或禁用/启用一次插件**让 Host 重新加载。
 
+- **运行中拒绝回滚（0.3.1）**：预览会通过事件流和 `sessionController.list()` 双重检测会话是否仍在运行（包括运行中的子代理）。运行中时面板禁用“执行回滚”，服务端在执行前也会再次拒绝；停止当前轮并等待 `turn/end` 后重新预览即可。不会自动 cancel 当前任务，避免静默杀掉用户正在跑的工作。
 - **快照链完整性**：`trim` 删除最老记录前，会先把新的最老记录提升为 `full` 基座；手动删除只允许删叶子，拒绝删还有子记录的基线。`resolveTree` 现在区分“完整树”和“残缺树”，残缺链直接拒绝回滚，避免把大量文件误判成“快照之后新建”而删除。
 - **一次一令牌 + 二次确认**：`/preview` 签发 5 分钟有效、只能用一次的 `planToken`，并绑定完整计划摘要。执行前客户端要求再确认一次；预览之后清单变了（新增/删除文件、目录变化），令牌校验会失败并要求重新预览。执行始终使用完整清单，不再受 HTTP 展示上限 500 条影响。
 - **回滚事务日志与中断恢复**：每次文件回滚写 `restore/<tx>.json`，记录 `in-progress`/`done`/`partial`/`failed`。进程中途退出后重启会把残留事务标成 `interrupted`，面板顶部出现恢复入口：可以继续还原目标，或回到回滚前恢复点。写文件改为同目录临时文件 + fsync + rename，对象写入也会校验内容哈希。
@@ -301,8 +302,9 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 - `lib/client.js`：浏览器半边（手写 bundle，只用 `react` / `react/jsx-runtime` 两个平台 seed，UI 全部走主题变量）。
 - `test/`：Node 内置 `node:test` 回归测试。若运行环境禁止子进程 spawn（Windows 沙箱常见），不要用
   `node --test`，直接逐个文件跑：`node test/chain.test.mjs`、`node test/restore.test.mjs`、
-  `node test/journal.test.mjs`、`node test/rel-path.test.mjs`。
+  `node test/running.test.mjs`、`node test/journal.test.mjs`、`node test/rel-path.test.mjs`。
 - `chain.test.mjs` 覆盖残缺链、trim 提升基座、删除保护；`restore.test.mjs` 覆盖完整清单回滚、令牌一次性/
-  计划漂移、跨会话增量、中断事务恢复、目录链接越界拒绝。
+  计划漂移、跨会话增量、中断事务恢复、目录链接越界拒绝；`running.test.mjs` 覆盖运行中拒绝、子代理运行中拒绝、
+  turn/start→turn/end 状态维护。
 - 代码中以 `DEV-ONLY` 标注的探针、启动标记与开发命令通道，均可安全地随发布副本一起存在：
   它们只在配置显式给出 `devChannelDir` 时才会启用。
