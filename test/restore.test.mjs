@@ -271,6 +271,8 @@ test('符号链接/目录链接指向工作区外时，回滚拒绝写出去', a
     assert.ok(report.files.failed > 0, '越界链接必须被拒绝，而不是写穿');
     assert.equal(await readFile(join(outside, 'a.txt'), 'utf8'), 'outside-original');
   } finally {
+    // 先摘掉目录链接再删临时根：Windows 上直接 rm(base) 可能因 junction 报 ENOTEMPTY。
+    await rm(join(cwd, 'sub'), { recursive: true, force: true }).catch(() => undefined);
     await rm(base, { recursive: true, force: true });
   }
 });

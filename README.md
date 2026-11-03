@@ -21,6 +21,18 @@ DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 - **边界提示**：扫描会统计符号链接/junction、排除项、超大文件、不可读项和 `.git` 目录，并在预览里提示“这些不会回滚”；回滚写入前做 `realpath` 校验，拒绝通过目录链接写到工作区外；会话 cwd 变化会更新缓存，跨 cwd 的对话回退会被跳过并提示。
 - **已知仍不完整**：`journal`（只恢复本会话修改的文件）仍只认 `write`/`edit`/`str_replace_editor`，经终端/构建/子代理的改动不在其中；`.git` 的提交、分支、索引状态仍不参与回滚；权限、可执行位、mtime 等元数据不恢复。这些会在预览里明确提示，但不会假装已覆盖。
 
+## 0.3.2 重点修复
+
+这一版修的是“会静默丢文件”的路径判定问题，升级后同样需要重启应用或禁用/启用一次插件。
+
+- **未知状态不再被当成“不存在”**：采集时读不到、超过 `maxFileBytes`、符号链接、非普通文件、以及 `readdir` 失败的目录，会写进快照记录的 `unknown` / `unknownDirs`，而不是写成 `changes[path] = null`。回滚到该快照时，这些路径只提示、不删除、不覆盖；预览会显示“状态未知”的数量。历史上因为临时占用/超限被记成“已删除”的记录，不会再被新逻辑主动删除。
+- **旧 v1 快照按保守策略处理**：0.3.1 及更早的记录没有 `unknown` 字段；如果它的统计里出现过符号链接/超大/不可读，预览会提示，且不删除“快照后新建”的路径、不按 `null` 删除当前文件。新采集的记录从 `v: 2` 开始，不受这个限制。旧记录无法补记，想获得完整语义请重新采集。
+- **`created-after` 只在“目标时点明确不存在”时生效**：以前“快照时没纳入”的文件，后来变得可扫描，回滚会把它当快照后新建删掉；现在目标记录的 `unknown` 会阻止这个判定。
+- **回滚顺序改为“先删、再清空目录、最后恢复”**：修复「快照里是 `a/b.txt`，现在 `a` 是同名文件」时先写失败、再删掉 `a`，最终两边都没有的问题；也补上了「目标要文件、当前是空目录」的显式 `rmdir`。
+- **Windows 仅大小写重命名按同一文件处理**：`Foo.txt` 与 `foo.txt` 折叠成同一个路径身份，不会再生成“恢复 Foo + 删除 foo”两条互相抵消的操作；预览、journal 过滤、类型冲突判断都使用这个身份。
+- **存储级串行 + 对象预检**：采集、预览、回滚、GC、prune、索引归并、锚点自愈共用一把存储锁；预览会检查计划要写的对象是否存在，执行前再逐个读对象校验内容哈希，缺失/损坏时在改动工作区前拒绝回滚，避免先删文件、写到一半才发现对象丢失。GC/prune 遇到无法解析的快照记录会跳过，而不是把它的引用当成“没有引用”删掉。
+- **回归测试**：新增 `test/unknown.test.mjs`，覆盖超限文件、`created-after` 翻转、文件/目录冲突、Windows 大小写重命名和对象缺失预检。
+
 ## 安装
 
 ### 方式一：官方插件命令（推荐）
@@ -112,7 +124,7 @@ pwsh -File install.ps1 -DevFromWorkspace
 $DSH_HOME/snapshot-manager/
   index/<workspaceKey>.json      工作区扫描索引：relPath -> {size, mtimeMs, hash}
   objects/<h2>/<hash>            文件内容对象（内容寻址，天然去重）
-  sessions/<sessionId>/<id>.json 快照记录：{phase, turn, seq, forkSeq, parent, full, changes, window, rollbackOf?}
+  sessions/<sessionId>/<id>.json 快照记录：{v, phase, turn, seq, forkSeq, parent, full, changes, unknown?, unknownDirs?, window, rollbackOf?}
   journal/<sessionId>.jsonl      本会话 write/edit 过的路径（“只恢复本次会话修改的文件”）
   restore/<tx>.json              回滚事务日志：in-progress/interrupted/done/partial/failed
 ```
@@ -279,6 +291,7 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 ## 安全边界与已知限制
 
 - 回滚**只处理快照跟踪过的路径**：被排除目录（`node_modules`、`target`、`.git` 等）与从未纳入快照的文件绝不触碰。
+- 采集时读不到/超限/符号链接/不可读目录记为 `unknown`，回滚会跳过并提示，**不会**把这些路径当成“快照时不存在”而删除；这类路径需要先恢复可读后重新采集/预览。
 - "快照之后新建的文件"会在回滚时被删除（这正是"回到那一刻"的语义）；预览会明确列出，**二次确认**后才执行。
 - 预览会统计符号链接/junction、排除项、超大文件、不可读项和 `.git` 目录；这些不会回滚，面板会提示。回滚写入前
   还会做 `realpath` 校验，目标路径的最近已存在祖先必须在工作区内；写操作拒绝目标是符号链接，避免通过目录链接写穿。
@@ -302,9 +315,10 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 - `lib/client.js`：浏览器半边（手写 bundle，只用 `react` / `react/jsx-runtime` 两个平台 seed，UI 全部走主题变量）。
 - `test/`：Node 内置 `node:test` 回归测试。若运行环境禁止子进程 spawn（Windows 沙箱常见），不要用
   `node --test`，直接逐个文件跑：`node test/chain.test.mjs`、`node test/restore.test.mjs`、
-  `node test/running.test.mjs`、`node test/journal.test.mjs`、`node test/rel-path.test.mjs`。
+  `node test/running.test.mjs`、`node test/journal.test.mjs`、`node test/rel-path.test.mjs`、`node test/unknown.test.mjs`。
 - `chain.test.mjs` 覆盖残缺链、trim 提升基座、删除保护；`restore.test.mjs` 覆盖完整清单回滚、令牌一次性/
   计划漂移、跨会话增量、中断事务恢复、目录链接越界拒绝；`running.test.mjs` 覆盖运行中拒绝、子代理运行中拒绝、
-  turn/start→turn/end 状态维护。
+  turn/start→turn/end 状态维护；`unknown.test.mjs` 覆盖超限 unknown、`created-after`
+  翻转、文件/目录冲突、对象缺失预检、旧 v1 保守判定、GC 损坏记录跳过与 Windows 大小写重命名。
 - 代码中以 `DEV-ONLY` 标注的探针、启动标记与开发命令通道，均可安全地随发布副本一起存在：
   它们只在配置显式给出 `devChannelDir` 时才会启用。
