@@ -33,6 +33,19 @@ DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 - **存储级串行 + 对象预检**：采集、预览、回滚、GC、prune、索引归并、锚点自愈共用一把存储锁；预览会检查计划要写的对象是否存在，执行前再逐个读对象校验内容哈希，缺失/损坏时在改动工作区前拒绝回滚，避免先删文件、写到一半才发现对象丢失。GC/prune 遇到无法解析的快照记录会跳过，而不是把它的引用当成“没有引用”删掉。
 - **回归测试**：新增 `test/unknown.test.mjs`，覆盖超限文件、`created-after` 翻转、文件/目录冲突、Windows 大小写重命名和对象缺失预检。
 
+## 0.3.3 源码修复（仅源码，未发布、未装入 profile）
+
+这一版只改了源码，升级前需要重新发布/安装才会生效。
+
+- **非法 `phase` / `sessionId` 不再能写出快照目录**：`phase` 收敛到白名单（`start`/`end`/`baseline`/`manual`/`pre-rollback`），`safeSegment` 拒绝 `.`、`..` 这类纯点号片段，记录 id 也做同样的净化。此前 `POST /capture` 传 `phase: '../../../x'` 可以把一条 JSON 记录写到存储根之外。
+- **运行中判定改为「任一来源为真即拒绝」**：`sessionController.list()` 的 `false` 不再覆盖事件流的 `true`（那会让回滚和正在写的轮次并发）；运行标记只在“事件流说运行中、list 明确空闲、且超过 1 小时没有任何新事件”时才视为陈旧并修回空闲。
+- **同一工作区有其他会话在跑时拒绝回滚**：预览会提示、执行会拒绝（此前的检查只看本会话，另一个共享 cwd 的会话正在写文件时回滚会互相覆盖）。
+- **长会话不再退化成每轮全量**：`full` 判据从 `snapshots.length % checkpointEvery` 改为「距上一个 full 的记录数」，修剪饱和（默认 200 条）后不会每轮都写全量。
+- **trim 提升 full 基座时保留合并后的 `unknown`/`unknownDirs`**：否则早先“存在但读不到/超限”的路径会在新基座里变成“从未存在”，之后回滚可能把它当 `created-after` 删掉。
+- **其他可靠性修复**：`journalLoaded` 与“起点快照自愈”不再因一次读失败永久降级；采集的工作区锁改为按**执行时**的 cwd；扫描超时改为逐文件检查（单个大目录也能中断）。
+- **深色主题按钮修复**：默认按钮不再用 `bg-layer-2` 当底色（深色主题下它是 `#2c2c2e`，按钮看起来就是一块黑）；时间线每行的“回滚…”改为品牌色描边（不填色，避免暗色主题下一排近白块）；主 CTA 用 `button-primary-fill` + `label-primary-foreground` 的配套前景色（原先硬编码 `#fff` 会白底白字）；“确认执行”改为实心错误色。
+- **新增回归测试**：`test/security.test.mjs`（phase/sessionId 路径穿越）、`test/full.test.mjs`（长会话 full 节奏、trim 保留 unknown）、`test/running.test.mjs` 增补（list 不覆盖事件流、陈旧标记自愈、同工作区他会话阻止回滚）。
+
 ## 安装
 
 ### 方式一：官方插件命令（推荐）
@@ -126,7 +139,7 @@ $DSH_HOME/snapshot-manager/
   objects/<h2>/<hash>            文件内容对象（内容寻址，天然去重）
   sessions/<sessionId>/<id>.json 快照记录：{v, phase, turn, seq, forkSeq, parent, full, changes, unknown?, unknownDirs?, window, rollbackOf?}
   journal/<sessionId>.jsonl      本会话 write/edit 过的路径（“只恢复本次会话修改的文件”）
-  restore/<tx>.json              回滚事务日志：in-progress/interrupted/done/partial/failed
+  restore/<tx>.json              回滚事务日志：in-progress/interrupted/done/partial/failed/recovered/reverted
 ```
 
 快照只存“与上一个快照的差异”，`checkpointEvery` 个之后写一次全量；还原时沿链回溯即可得到任意时点的完整路径表。
@@ -149,7 +162,7 @@ $DSH_HOME/snapshot-manager/
 | POST | `/recover` | `{id, action: 'resume' \| 'revert'}`：继续还原目标，或回到回滚前恢复点 |
 | POST | `/pruneSnapshots` | 删除孤立快照（会话日志已不存在）+ 归并遗留的工作区索引 key |
 | POST | `/gc` | 回收没有任何快照记录引用的内容对象 |
-| GET | `/beacon` | 客户端挂载信标（诊断用） |
+| POST | `/beacon` | 客户端挂载信标（诊断用） |
 
 ## 维护
 
@@ -247,7 +260,7 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 | 范围 | 语义 | 代价 |
 |---|---|---|
 | **全量**（默认） | 完整还原到该时点：带外改动也会被还原或删除 | 可能覆盖你在快照之后的开发工作 |
-| **只恢复本次会话修改的文件** | 只动本会话自己 `write`/`edit` 写过的路径 | **可能残留**：经 `pwsh`、构建、子代理产生的改动抓不到（这些会**列在回滚报告里**，见下） |
+| **只恢复本次会话修改的文件** | 只动本会话自己 `write`/`edit` 写过的路径 | **可能残留**：经 `pwsh`、构建、子代理产生的改动抓不到（报告里只有未跟踪/未知的**计数与警告**，不逐条列出这些路径） |
 
 - 收窄范围靠的是事件流里 `tool/call` 的参数路径，覆盖 `write` / `edit` 以及有修改作用的
   `str_replace_editor`（`create`/`str_replace`/`insert`；`view` 是只读，不计入），
