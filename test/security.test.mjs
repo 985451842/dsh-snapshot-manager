@@ -44,7 +44,7 @@ test('非法 phase 不会进记录 id，也不会把记录写出会话目录', a
     assert.equal(result.record.id.includes('..'), false);
 
     const sessionsRoot = await readdir(join(root, 'sessions'));
-    assert.deepEqual(sessionsRoot, ['session-sec'], '存储根下只应有这一个会话目录');
+    assert.deepEqual(sessionsRoot.filter((name) => name !== '.manifest.json'), ['session-sec'], '存储根下只应有这一个会话目录');
     const inside = await readdir(join(root, 'sessions', 'session-sec'));
     assert.deepEqual(inside, [`${result.record.id}.json`], '记录必须落在会话自己的目录里');
   } finally {
@@ -61,7 +61,7 @@ test('sessionId 为 ".." 时读写仍限制在 sessions 目录内', async () => 
     const result = await service.capture(session, 'manual', {});
 
     const sessionsRoot = await readdir(join(root, 'sessions'));
-    assert.deepEqual(sessionsRoot, [safeSegment('..')], '记录不能落到 sessions 根目录');
+    assert.deepEqual(sessionsRoot.filter((name) => name !== '.manifest.json'), [safeSegment('..')], '记录不能落到 sessions 根目录');
     assert.equal(result.record.id.includes('..'), false);
 
     const listed = await service.listSnapshots('..');

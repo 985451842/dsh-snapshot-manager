@@ -261,6 +261,10 @@ test('符号链接/目录链接指向工作区外时，回滚拒绝写出去', a
     }
 
     const preview = await service.preview(session.id, capture.record.id);
+    assert.ok(
+      preview.unknown.some((item) => item.rel === 'sub/a.txt'),
+      '链接下的路径必须标记为状态未知，不能安排写入',
+    );
     const report = await service.restore({
       sessionId: session.id,
       snapshotId: capture.record.id,
@@ -268,7 +272,8 @@ test('符号链接/目录链接指向工作区外时，回滚拒绝写出去', a
       conversation: false,
       planToken: preview.planToken,
     });
-    assert.ok(report.files.failed > 0, '越界链接必须被拒绝，而不是写穿');
+    assert.equal(report.files.restored, 0, '越界链接下的路径不应被恢复');
+    assert.equal(report.files.failed, 0, '计划阶段就跳过，不应算执行失败');
     assert.equal(await readFile(join(outside, 'a.txt'), 'utf8'), 'outside-original');
   } finally {
     // 先摘掉目录链接再删临时根：Windows 上直接 rm(base) 可能因 junction 报 ENOTEMPTY。

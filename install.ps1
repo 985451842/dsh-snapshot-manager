@@ -7,6 +7,7 @@
 #
 # 用法：
 #   pwsh -File install.ps1 -DevFromWorkspace
+#   pwsh -File install.ps1 -DevFromWorkspace -DevChannelDir 'D:/tmp/plugin-dev'  # 可选：启用文件命令通道
 #   pwsh -File install.ps1 -Release
 #   pwsh -File install.ps1 -Release -SkipPatch   # 只复制文件
 
@@ -15,7 +16,7 @@ param(
     [Parameter(ParameterSetName = 'Dev')][switch]$DevFromWorkspace,
     [Parameter(ParameterSetName = 'Release')][switch]$Release,
     [switch]$SkipPatch,
-    [string]$DevChannelDir = 'D:/javaProject/dsh/.dsh-probe/plugin-dev'
+    [string]$DevChannelDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,7 @@ $PatchFile  = Join-Path $ProfileDir 'cordis.patch.yml'
 
 $Begin = '# >>> dsh-snapshot-manager (managed by install.ps1) >>>'
 $End   = '# <<< dsh-snapshot-manager <<<'
+$DevChannelToken = ''
 
 if ($Release) {
     Write-Host '模式：发布（自包含安装到 DSH home）'
@@ -78,6 +80,12 @@ if ($Release) {
 } else {
     Write-Host '模式：开发（入口指向工作区，改完即生效）'
     $Entry  = (Join-Path $Source 'lib\bootstrap.js') -replace '\\', '/'
+    if ($DevChannelDir -ne '') {
+        # 文件命令通道没有身份校验；生成一次性 token，命令文件必须带同一 token。
+        $DevChannelToken = [guid]::NewGuid().ToString('N')
+        Write-Host "开发命令通道: $DevChannelDir"
+        Write-Host "通道 token  : $DevChannelToken（cmd.json 必须带 `"token`": `"$DevChannelToken`"）"
+    }
 }
 
 Write-Host "入口路径    : $Entry"
@@ -113,6 +121,7 @@ if ($DevChannelDir -ne '') {
     # 只有开发模式才写入开发通道目录；发布副本保持纯净。
     $entryLines.Add('      config:')
     $entryLines.Add("        devChannelDir: '$DevChannelDir'")
+    $entryLines.Add("        devChannelToken: '$DevChannelToken'")
 }
 
 $block = New-Object System.Collections.Generic.List[string]

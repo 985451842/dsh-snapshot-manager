@@ -46,6 +46,19 @@ DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 - **深色主题按钮修复**：默认按钮不再用 `bg-layer-2` 当底色（深色主题下它是 `#2c2c2e`，按钮看起来就是一块黑）；时间线每行的“回滚…”改为品牌色描边（不填色，避免暗色主题下一排近白块）；主 CTA 用 `button-primary-fill` + `label-primary-foreground` 的配套前景色（原先硬编码 `#fff` 会白底白字）；“确认执行”改为实心错误色。
 - **新增回归测试**：`test/security.test.mjs`（phase/sessionId 路径穿越）、`test/full.test.mjs`（长会话 full 节奏、trim 保留 unknown）、`test/running.test.mjs` 增补（list 不覆盖事件流、陈旧标记自愈、同工作区他会话阻止回滚）。
 
+## 0.3.4 修复
+
+基于 0.3.3 的三路缺陷审计（采集/存储、预览/回滚、HTTP/客户端）修复：
+
+- **`/cd` 后按有效工作目录采集与回滚**：不再使用不可变的 `session.header.cwd`；优先读宿主 `workingDirectory` 投影，冷会话从持久化事件流里取最后一条 `working-directory/change`，其次才回退 header。`capture`、工作区锁、journal、手动快照、预览与恢复点都统一走同一入口。
+- **冷会话手动快照不再依赖不存在的 `sessionController.inspect()`**：改为活会话投影 → 事件日志 → `list()` / `sessionPersistence.stat()`（当前 DSH 0.2.2-rc.1 没有 `inspect`）。
+- **首轮/插件重载后的对话切点不再重放原提问**：没有 `lastTurnEndSeq` 时，从事件流按 DSH 的完成轮次规则计算切点（停在 `agent/inbox/spliced`/用户消息之前）；旧记录在预览时重新校验，不安全的切点直接禁用对话回退，而不是冒险 fork。新记录带 `forkSeqSafe` 标记。
+- **工作区内目录 junction 不再被写穿**：计划阶段把当前符号链接/junction 下的目标视为 unknown、跳过写入；执行守卫除“仍在工作区内”外，还校验最近已存在祖先的真实相对路径与计划 rel 一致。
+- **`recover` 也先生成恢复点**：继续/回到回滚前的恢复入口与正常回滚一样，先采集当前工作区，采集失败中止；新增恢复点可用“回滚前”行撤销。
+- **GC/prune fail-closed**：`sessions` 根或会话目录读不到、记录无法解析、`dshHome` 看不到日志时一律跳过删除，不再把“读不到”当成“没有引用/日志不存在”；并且没有找到任何会话日志时拒绝批量删除快照。
+- **其他修复**：以 `..` 开头的合法文件名不再被误判为越界；只回退对话时令牌在恢复点成功后才消费；手动快照 label 不再污染后续自动快照；子代理轮次不再入队采集；`window.risk` 以触发时刻为基准；恢复入口的客户端清理与跳过提示；`POST /beacon` 限制诊断 detail 大小；`/snapshots` 缺参返回 400；新增 `lib/bootstrap.js` 补回开发模式入口；记录新增 `emptyDirs` 清单（只存没有文件的目录），回滚时保留快照时点已有的空目录、清理快照后新建的空目录；`maxFilesPerSnapshot`/`maxSessionBytes` 从“死配置”改为真正生效；启动时清理 7 天前的已收尾回滚事务日志；新增 `test/fixes.test.mjs`（19 项回归）。
+- **HTTP / 客户端 / 并发**：HTTP 业务错误按参数/未找到/冲突/内部错误映射到 400/404/409/500；`/capture` 只接受 `sessionId`/`label`，不再透传内部 `phase`/`seq`/`forkSeq`；`promptText` 上限 100000 字符；客户端请求 180 秒超时，并用会话/序号代际丢弃切会话或关闭面板后的迟到响应；恢复入口与主回滚一样二次确认；服务端常用错误/警告按语义映射到中英文；开发命令强制 `id`/`token` 并净化输出文件名；存储队列挂到跨代共享 holder，跨进程用 `.store.lock`（PID 存活 + 30 分钟陈旧容忍）串行；full 快照的展示改动数改为相对上一快照的实际差异，而不是文件总数；macOS 按默认大小写不敏感卷做 NFC + 大小写折叠（大小写敏感卷仍是已知边界）。
+
 ## 安装
 
 ### 方式一：官方插件命令（推荐）
@@ -104,8 +117,10 @@ pwsh -File install.ps1 -DevFromWorkspace
 # <<< dsh-snapshot-manager <<<
 ```
 
-开发模式会额外写入 `config.devChannelDir`（默认 `D:/javaProject/dsh/.dsh-probe/plugin-dev`，
-随工作区走），用于开发期的文件命令通道；发布模式不写。
+开发模式默认**不启用**文件命令通道；需要 E2E 调试时显式传 `-DevChannelDir <dir>`。安装脚本会生成
+一次性 `devChannelToken` 并打印出来，`cmd.json` 必须带同一 token；通道命令还必须带 `id`，输出文件名会做安全净化。
+该通道没有用户身份校验（只适合本机临时调试），不要把通道目录放在共享目录里；缺少 token 的旧配置会被拒绝启动。
+发布模式不写该配置。
 
 ### 生效方式
 
@@ -126,10 +141,13 @@ pwsh -File install.ps1 -DevFromWorkspace
 | `excludes` | 见 `DEFAULT_EXCLUDES` | 按路径段排除的目录名 |
 | `excludeExtensions` | 见 `DEFAULT_EXCLUDE_EXTENSIONS` | 按扩展名排除 |
 | `maxFileBytes` | 8 MiB | 单个文件超过则不纳入快照 |
+| `maxFilesPerSnapshot` | 20000 | 单次扫描的文件数硬上限，超出直接中止（不会静默截断） |
+| `maxSessionBytes` | 512 MiB | 单次快照纳入的文件总字节上限，超出中止采集 |
 | `maxSnapshotsPerSession` | 200 | 每会话保留快照数，超出从最旧回收 |
 | `checkpointEvery` | 20 | 每多少个快照写一次全量记录（限制链式回溯长度） |
 | `scanTimeoutMs` | 60000 | 单次扫描超时 |
 | `devChannelDir` | 空 | **开发期专用**：命令通道目录；发布时不要设置 |
+| `devChannelToken` | 空 | 开发命令通道 token；缺省时通道不启动 |
 
 ## 存储结构
 
@@ -137,7 +155,8 @@ pwsh -File install.ps1 -DevFromWorkspace
 $DSH_HOME/snapshot-manager/
   index/<workspaceKey>.json      工作区扫描索引：relPath -> {size, mtimeMs, hash}
   objects/<h2>/<hash>            文件内容对象（内容寻址，天然去重）
-  sessions/<sessionId>/<id>.json 快照记录：{v, phase, turn, seq, forkSeq, parent, full, changes, unknown?, unknownDirs?, window, rollbackOf?}
+  sessions/<sessionId>/<id>.json 快照记录：{v, phase, turn, seq, forkSeq, parent, full, changes, emptyDirs?, unknown?, unknownDirs?, window, rollbackOf?}
+  sessions/.manifest.json        曾有过快照的会话清单（GC 在会话目录整体不可见时据此拒绝回收对象）
   journal/<sessionId>.jsonl      本会话 write/edit 过的路径（“只恢复本次会话修改的文件”）
   restore/<tx>.json              回滚事务日志：in-progress/interrupted/done/partial/failed/recovered/reverted
 ```
@@ -221,7 +240,7 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 
 - **基线**（`phase: 'baseline'`）：仅当插件在某会话中途才挂上、该会话一条记录都没有时补一条，
   保证正在跑的这一轮也有还原点。
-- **旧模型的"结果"快照**（`phase: 'end'`）不再新增也不再展示；历史记录仍留在库里（回滚时按轮号兜底可见）。
+- **旧模型的"结果"快照**（`phase: 'end'`）不再新增；历史记录仍留在库里并会在时间线展示（兼容旧库，回滚仍按轮号兜底）。
 - **手动**（`phase: 'manual'`）与**回滚前**（`phase: 'pre-rollback'`）不受影响。
 
 ### 工作目录是怎么解析出来的
@@ -334,4 +353,4 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
   turn/start→turn/end 状态维护；`unknown.test.mjs` 覆盖超限 unknown、`created-after`
   翻转、文件/目录冲突、对象缺失预检、旧 v1 保守判定、GC 损坏记录跳过与 Windows 大小写重命名。
 - 代码中以 `DEV-ONLY` 标注的探针、启动标记与开发命令通道，均可安全地随发布副本一起存在：
-  它们只在配置显式给出 `devChannelDir` 时才会启用。
+  它们只在配置显式给出 `devChannelDir` 和 `devChannelToken` 时才会启用。
