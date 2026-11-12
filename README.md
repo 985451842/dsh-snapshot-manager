@@ -75,6 +75,10 @@ DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 - **新增排除不会把旧文件记成删除**：如果上一条快照里纳入过的路径这次被新排除规则、gitignore 或插件清单跳过，记为 `unknown: 'excluded'`，而不是 `changes[path] = null`；回滚只提示、不删除。被整棵跳过的目录会写进快照 `ignoredDirs`，回滚到该快照时视为“未采集”。
 - **回归测试**：新增 `test/excludes.test.mjs`（通配匹配、默认 `.tmp-*`、gitignore 目录与文件、超限诊断、自动写入并重扫、源码目录不自动排除、清单路径/通配与手动增删、旧路径过渡）。
 
+## 0.4.1 修复
+
+- **修复快照面板「排除清单」导致的 React #310**：`loadIgnore` 的 `useCallback` 被放在了“面板未打开就 `return null`”的早退之后，打开面板时 hook 数量发生变化，React 抛 `Rendered more hooks than during the previous render`，表现为面板显示“快照插件渲染出错”。已把该 hook 移到早退之前，并确认早退之后不再有任何 hook。
+
 ## 安装
 
 ### 方式一：官方插件命令（推荐）
