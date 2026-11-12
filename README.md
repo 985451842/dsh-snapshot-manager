@@ -59,6 +59,22 @@ DeepSeek Harness（DSH）桌面版插件：**会话快照 / 回滚**。
 - **其他修复**：以 `..` 开头的合法文件名不再被误判为越界；只回退对话时令牌在恢复点成功后才消费；手动快照 label 不再污染后续自动快照；子代理轮次不再入队采集；`window.risk` 以触发时刻为基准；恢复入口的客户端清理与跳过提示；`POST /beacon` 限制诊断 detail 大小；`/snapshots` 缺参返回 400；新增 `lib/bootstrap.js` 补回开发模式入口；记录新增 `emptyDirs` 清单（只存没有文件的目录），回滚时保留快照时点已有的空目录、清理快照后新建的空目录；`maxFilesPerSnapshot`/`maxSessionBytes` 从“死配置”改为真正生效；启动时清理 7 天前的已收尾回滚事务日志；新增 `test/fixes.test.mjs`（19 项回归）。
 - **HTTP / 客户端 / 并发**：HTTP 业务错误按参数/未找到/冲突/内部错误映射到 400/404/409/500；`/capture` 只接受 `sessionId`/`label`，不再透传内部 `phase`/`seq`/`forkSeq`；`promptText` 上限 100000 字符；客户端请求 180 秒超时，并用会话/序号代际丢弃切会话或关闭面板后的迟到响应；恢复入口与主回滚一样二次确认；服务端常用错误/警告按语义映射到中英文；开发命令强制 `id`/`token` 并净化输出文件名；存储队列挂到跨代共享 holder，跨进程用 `.store.lock`（PID 存活 + 30 分钟陈旧容忍）串行；full 快照的展示改动数改为相对上一快照的实际差异，而不是文件总数；macOS 按默认大小写不敏感卷做 NFC + 大小写折叠（大小写敏感卷仍是已知边界）。
 
+## 0.4.0 排除规则优化：不再只靠目录名
+
+这一版解决「别人新建的缓存/生成目录没有被排除，文件数撞上 `maxFilesPerSnapshot`」的问题。升级后需要重启应用或禁用/启用一次插件。
+
+- **`excludes` 支持段级通配**：条目里可用 `*`（任意字符）和 `?`（单字符），只匹配单个路径段，例如 `.tmp-*`。默认排除表新增 `.tmp-*`、`.temp-*`，同类临时目录不必逐个登记。
+- **默认跳过 git 忽略的目录（`excludeGitignoredDirs: true`）**：扫描前执行一次 `git ls-files --others --ignored --exclude-standard --directory`，把被忽略的目录整棵跳过。它按“来源”而不是名字判断，别人新造的生成目录只要被 ignore 就能命中。
+  - **只跳过目录，不跳过被忽略的文件**：`.env`、本地配置文件等被忽略的文件仍会纳入快照、仍可回滚。
+  - 非 git 仓库、未安装 git、命令超时（5 秒）或输出异常时静默回退到 0.3.x 行为，不会因为一个可选优化让采集失败。
+  - 取舍：被忽略目录里的内容不参与快照/回滚（计入预览的“未纳入快照”提示）。如果确实要回滚这类目录，把该项设为 `false`，或把目录从 `.gitignore` 移出。
+  - 被跳过的目录会写进快照记录（`ignoredDirs`）：之后取消忽略或关掉开关时，回滚到旧快照会把这些路径视为“未采集”而跳过，不会当成 created-after 删除；修剪提升 full 基座时会合并进 `unknownDirs`。
+- **超限报错带头部目录**：超过 `maxFilesPerSnapshot` 后不再在第 20001 个文件处直接失败，而是转成轻量计数（不再 `stat`/哈希）走完目录树，报出“文件数最多的未排除目录”和处理建议（移出工作区 / 加入 `excludes` / 开启 `excludeGitignoredDirs` / 调大上限），第一次失败就能定位。
+- **插件自动维护排除清单（`autoIgnore: 'overflow'`，默认开启）**：采集将要超过 `maxFilesPerSnapshot` 时，先做一次只读统计，挑出“子树 ≥100 个文件、且不含任何源码/文本/配置/数据文件”的目录，以**相对路径**写进插件数据目录下的清单 `$DSH_HOME/snapshot-manager/ignore/<workspaceKey>.json`，然后重扫一次；采集成功后在日志/统计里记录，失败则给出“已自动加入但仍超限”的原因。含源码/文本文件的目录**不会**被自动排除（宁可失败，也不静默缩小回滚范围）；`autoIgnore: 'off'` 可关闭自动写入。
+- **手动管理当前工作区的排除项**：快照面板新增「排除清单」入口，可以查看/添加/删除当前工作区的清单条目（路径前缀或名称通配），与自动写入共用同一个文件；host 接口为 `GET/POST/DELETE /api/snapshot-manager/v4/ignore`。
+- **新增排除不会把旧文件记成删除**：如果上一条快照里纳入过的路径这次被新排除规则、gitignore 或插件清单跳过，记为 `unknown: 'excluded'`，而不是 `changes[path] = null`；回滚只提示、不删除。被整棵跳过的目录会写进快照 `ignoredDirs`，回滚到该快照时视为“未采集”。
+- **回归测试**：新增 `test/excludes.test.mjs`（通配匹配、默认 `.tmp-*`、gitignore 目录与文件、超限诊断、自动写入并重扫、源码目录不自动排除、清单路径/通配与手动增删、旧路径过渡）。
+
 ## 安装
 
 ### 方式一：官方插件命令（推荐）
@@ -138,10 +154,12 @@ pwsh -File install.ps1 -DevFromWorkspace
 | `root` | `$DSH_HOME/snapshot-manager` | 快照库根目录 |
 | `captureOnTurnStart` | `true` | 轮次开始采集（**每轮唯一的那条快照**，"回到本轮之前 / 编辑并重来"依赖它） |
 | `captureOnTurnEnd` | `true` | 轮次结束时的**兜底基线**：仅当该会话一条快照都没有时才补一条（插件在会话中途才挂上时用），不会每轮新增记录 |
-| `excludes` | 见 `DEFAULT_EXCLUDES` | 按路径段排除的目录名 |
+| `excludes` | 见 `DEFAULT_EXCLUDES` | 按路径段排除；支持 `*` / `?` 通配（如 `.tmp-*`），只匹配单个路径段；**整体替换默认表**（不是追加） |
 | `excludeExtensions` | 见 `DEFAULT_EXCLUDE_EXTENSIONS` | 按扩展名排除 |
+| `excludeGitignoredDirs` | `true` | 扫描时按 git 忽略规则跳过目录（只跳目录、保留被忽略文件；非 git 仓库/超时自动回退） |
+| `autoIgnore` | `'overflow'` | 采集将要超限时，把“零源码/文本文件”的大目录自动写进插件清单并重扫；`'off'` 关闭自动写入（清单仍会被读取） |
 | `maxFileBytes` | 8 MiB | 单个文件超过则不纳入快照 |
-| `maxFilesPerSnapshot` | 20000 | 单次扫描的文件数硬上限，超出直接中止（不会静默截断） |
+| `maxFilesPerSnapshot` | 20000 | 单次扫描的文件数硬上限，超出直接中止（不会静默截断；超限时报告最占用的未排除目录） |
 | `maxSessionBytes` | 512 MiB | 单次快照纳入的文件总字节上限，超出中止采集 |
 | `maxSnapshotsPerSession` | 200 | 每会话保留快照数，超出从最旧回收 |
 | `checkpointEvery` | 20 | 每多少个快照写一次全量记录（限制链式回溯长度） |
@@ -154,8 +172,9 @@ pwsh -File install.ps1 -DevFromWorkspace
 ```
 $DSH_HOME/snapshot-manager/
   index/<workspaceKey>.json      工作区扫描索引：relPath -> {size, mtimeMs, hash}
+  ignore/<workspaceKey>.json     插件维护的排除清单：{kind: 'path'|'pattern', value, source: 'auto'|'manual'}
   objects/<h2>/<hash>            文件内容对象（内容寻址，天然去重）
-  sessions/<sessionId>/<id>.json 快照记录：{v, phase, turn, seq, forkSeq, parent, full, changes, emptyDirs?, unknown?, unknownDirs?, window, rollbackOf?}
+  sessions/<sessionId>/<id>.json 快照记录：{v, phase, turn, seq, forkSeq, parent, full, changes, emptyDirs?, unknown?, unknownDirs?, ignoredDirs?, window, rollbackOf?}
   sessions/.manifest.json        曾有过快照的会话清单（GC 在会话目录整体不可见时据此拒绝回收对象）
   journal/<sessionId>.jsonl      本会话 write/edit 过的路径（“只恢复本次会话修改的文件”）
   restore/<tx>.json              回滚事务日志：in-progress/interrupted/done/partial/failed/recovered/reverted
@@ -178,6 +197,7 @@ $DSH_HOME/snapshot-manager/
 | POST | `/capture` | 手动打快照：`{sessionId, label?}`。**不需要传 cwd** —— 客户端只发 sessionId，工作目录由 Host 解析 |
 | DELETE | `/snapshot?sessionId=&snapshotId=` | 删除某条快照。只允许删叶子；有子记录的基线会被拒绝 |
 | GET | `/recoveries?sessionId=` | 列出 `in-progress`/`interrupted`/`partial`/`failed` 的回滚事务 |
+| GET/POST/DELETE | `/ignore` | 读取/添加/删除当前工作区的插件排除清单（GET 用 `sessionId` 查询；POST/DELETE 体为 `{sessionId, kind: 'path'\|'pattern', value}`） |
 | POST | `/recover` | `{id, action: 'resume' \| 'revert'}`：继续还原目标，或回到回滚前恢复点 |
 | POST | `/pruneSnapshots` | 删除孤立快照（会话日志已不存在）+ 归并遗留的工作区索引 key |
 | POST | `/gc` | 回收没有任何快照记录引用的内容对象 |
@@ -204,6 +224,7 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 | 快照面板行内 | 回滚…（展开后：☑ 恢复文件 → 可选「只恢复本次会话修改的文件」、☑ 回退对话、可选把输入发进新会话；再点一次「确认执行」才真正执行）/ 删除（只允许删叶子） |
 | 「回滚前」行 | 「撤销这次回滚…」：默认只恢复文件、不重复 fork 对话 |
 | 面板顶部 | 中断/部分失败的回滚事务：继续还原目标 / 回到回滚前 |
+| 快照面板右上角 | 「排除清单」：查看/添加/删除当前工作区的路径前缀、名称通配（自动写入的条目 source=auto） |
 | 快照面板右上角 | 「清理快照垃圾」（孤立快照 + 无引用对象 + 索引 key 归并） |
 
 ## 快照模型：每轮一条
@@ -322,8 +343,11 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 
 ## 安全边界与已知限制
 
-- 回滚**只处理快照跟踪过的路径**：被排除目录（`node_modules`、`target`、`.git` 等）与从未纳入快照的文件绝不触碰。
-- 采集时读不到/超限/符号链接/不可读目录记为 `unknown`，回滚会跳过并提示，**不会**把这些路径当成“快照时不存在”而删除；这类路径需要先恢复可读后重新采集/预览。
+- 回滚**只处理快照跟踪过的路径**：被排除目录（`node_modules`、`target`、`.git` 等）、被 git 忽略的目录与从未纳入快照的文件绝不触碰。
+- `excludeGitignoredDirs` 默认开启，依赖工作区是 git 仓库且 `git` 可用；它只跳过被忽略的**目录**，被忽略的文件仍会采集。关闭它可以让被忽略目录重新进入快照，但大缓存目录会明显拖慢采集并可能撞上文件数/字节上限。
+- 自动忽略（`autoIgnore: 'overflow'`）只在**本来就要失败**时触发，且只挑“子树 ≥100 个文件、不含源码/文本/配置/数据文件”的目录；含源码或文档的目录不会被自动排除，需要手动用「排除清单」或 `excludes` 添加。自动写入的清单是机器本地的（`$DSH_HOME` 下），不跟仓库走；移动/重命名工作区会换 key，需要重新添加。
+- 被清单跳过的目录会写进快照 `ignoredDirs`/`unknownDirs`；清掉清单条目后再回滚到旧快照不会把它们当 created-after 删除，但回滚到“当时还纳入这些目录”的更早快照仍可能写回这些目录，预览会列出。
+- 采集时读不到/超限/符号链接/不可读目录记为 `unknown`，回滚会跳过并提示，**不会**把这些路径当成“快照时不存在”而删除；这类路径需要先恢复可读后重新采集/预览。因新增排除规则而不再扫描的旧路径也会记为 `unknown: 'excluded'`。
 - "快照之后新建的文件"会在回滚时被删除（这正是"回到那一刻"的语义）；预览会明确列出，**二次确认**后才执行。
 - 预览会统计符号链接/junction、排除项、超大文件、不可读项和 `.git` 目录；这些不会回滚，面板会提示。回滚写入前
   还会做 `realpath` 校验，目标路径的最近已存在祖先必须在工作区内；写操作拒绝目标是符号链接，避免通过目录链接写穿。
@@ -347,10 +371,12 @@ POST /gc               # 回收没有任何快照记录引用的内容对象
 - `lib/client.js`：浏览器半边（手写 bundle，只用 `react` / `react/jsx-runtime` 两个平台 seed，UI 全部走主题变量）。
 - `test/`：Node 内置 `node:test` 回归测试。若运行环境禁止子进程 spawn（Windows 沙箱常见），不要用
   `node --test`，直接逐个文件跑：`node test/chain.test.mjs`、`node test/restore.test.mjs`、
-  `node test/running.test.mjs`、`node test/journal.test.mjs`、`node test/rel-path.test.mjs`、`node test/unknown.test.mjs`。
+  `node test/running.test.mjs`、`node test/journal.test.mjs`、`node test/rel-path.test.mjs`、`node test/unknown.test.mjs`、
+  `node test/excludes.test.mjs`。
 - `chain.test.mjs` 覆盖残缺链、trim 提升基座、删除保护；`restore.test.mjs` 覆盖完整清单回滚、令牌一次性/
   计划漂移、跨会话增量、中断事务恢复、目录链接越界拒绝；`running.test.mjs` 覆盖运行中拒绝、子代理运行中拒绝、
   turn/start→turn/end 状态维护；`unknown.test.mjs` 覆盖超限 unknown、`created-after`
-  翻转、文件/目录冲突、对象缺失预检、旧 v1 保守判定、GC 损坏记录跳过与 Windows 大小写重命名。
+  翻转、文件/目录冲突、对象缺失预检、旧 v1 保守判定、GC 损坏记录跳过与 Windows 大小写重命名；
+  `excludes.test.mjs` 覆盖段级通配、默认 `.tmp-*`、gitignore 目录/文件、超限诊断、自动写入并重扫、源码目录不自动排除、清单路径/通配与手动增删、旧路径过渡（git 相关用例依赖 `git init`，没有 git 时自动跳过）。
 - 代码中以 `DEV-ONLY` 标注的探针、启动标记与开发命令通道，均可安全地随发布副本一起存在：
   它们只在配置显式给出 `devChannelDir` 和 `devChannelToken` 时才会启用。
