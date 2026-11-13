@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -284,6 +284,7 @@ test('手动管理插件忽略清单：添加、去重、删除', async () => {
     let info = await service.listManagedIgnore(sessionId);
     assert.equal(info.entries.length, 0);
     assert.ok(info.file.includes('ignore'));
+    assert.equal((await stat(info.file)).isFile(), true);
 
     await service.addManagedIgnore(sessionId, { kind: 'path', value: 'a/.umi' });
     await service.addManagedIgnore(sessionId, { kind: 'path', value: 'a/.umi' });
