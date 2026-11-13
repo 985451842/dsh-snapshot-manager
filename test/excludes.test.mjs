@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   compileExcludeMatcher,
+  DEFAULT_MANAGED_IGNORES,
   isExcluded,
   listGitignoredDirs,
   managedIgnoreFile,
@@ -147,6 +148,30 @@ test('新增排除规则时，原本已纳入的路径记 unknown 而不是删�
   }
 });
 
+test('新工作区默认排除 tmp/logs 等清单条目', async () => {
+  const { base, cwd, root } = await fixture('dsh-managed-defaults-');
+  try {
+    for (const dir of ['tmp', 'logs', '.turbo', '.parcel-cache']) {
+      await mkdir(join(cwd, dir), { recursive: true });
+      await writeFile(join(cwd, dir, 'f.txt'), 'x', 'utf8');
+    }
+    await writeFile(join(cwd, 'debug.log'), 'log', 'utf8');
+    await writeFile(join(cwd, 'keep.js'), 'code', 'utf8');
+    const config = resolveConfig({ root });
+    const result = await scanWorkspace({ cwd, config, previousIndex: null });
+    assert.deepEqual(Object.keys(result.index.entries), ['keep.js']);
+    assert.ok(result.ignoredDirs.includes('tmp'));
+    assert.ok(result.ignoredDirs.includes('logs'));
+    assert.ok(result.ignoredDirs.includes('.turbo'));
+    assert.ok(result.ignoredDirs.includes('.parcel-cache'));
+    const managed = await readManagedIgnore(config, cwd);
+    assert.equal(managed.entries.length, DEFAULT_MANAGED_IGNORES.length);
+    assert.ok(managed.entries.every((entry) => entry.source === 'default'));
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test('gitignore 目录写进快照：之后取消忽略，回滚到旧快照也不会把它当新建删除', { skip: !hasGit() }, async () => {
   const { base, cwd, root } = await fixture('dsh-excl-git-rec-');
   try {
@@ -185,7 +210,7 @@ test('超限时自动写入插件自己的忽略清单并重扫成功', async ()
   const { base, cwd, root } = await fixture('dsh-auto-ignore-');
   try {
     await mkdir(join(cwd, 'junk'), { recursive: true });
-    for (let i = 0; i < 120; i += 1) await writeFile(join(cwd, 'junk', `f${i}.log`), 'x', 'utf8');
+    for (let i = 0; i < 120; i += 1) await writeFile(join(cwd, 'junk', `f${i}.lock`), 'x', 'utf8');
     await mkdir(join(cwd, 'src'), { recursive: true });
     await writeFile(join(cwd, 'src', 'main.js'), 'code', 'utf8');
 
@@ -198,9 +223,9 @@ test('超限时自动写入插件自己的忽略清单并重扫成功', async ()
     assert.ok(result.ignoredDirs.includes('junk'));
 
     const managed = await readManagedIgnore(config, cwd);
-    assert.deepEqual(managed.entries.map((entry) => entry.value), ['junk']);
-    assert.equal(managed.entries[0].kind, 'path');
-    assert.equal(managed.entries[0].source, 'auto');
+    assert.ok(managed.entries.some((entry) => entry.value === 'junk' && entry.kind === 'path' && entry.source === 'auto'));
+    assert.ok(managed.entries.some((entry) => entry.source === 'default'));
+    assert.equal(managed.entries.filter((entry) => entry.source === 'default').length, DEFAULT_MANAGED_IGNORES.length);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -217,7 +242,8 @@ test('含源码/文本的目录不会被自动忽略', async () => {
       /maxFilesPerSnapshot/,
     );
     const managed = await readManagedIgnore(config, cwd);
-    assert.equal(managed.entries.length, 0);
+    assert.equal(managed.entries.length, DEFAULT_MANAGED_IGNORES.length);
+    assert.ok(managed.entries.every((entry) => entry.source === 'default'));
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -227,14 +253,15 @@ test('autoIgnore: off 时不写清单', async () => {
   const { base, cwd, root } = await fixture('dsh-auto-ignore-off-');
   try {
     await mkdir(join(cwd, 'junk'), { recursive: true });
-    for (let i = 0; i < 120; i += 1) await writeFile(join(cwd, 'junk', `f${i}.log`), 'x', 'utf8');
+    for (let i = 0; i < 120; i += 1) await writeFile(join(cwd, 'junk', `f${i}.lock`), 'x', 'utf8');
     const config = resolveConfig({ root, maxFilesPerSnapshot: 2, autoIgnore: 'off' });
     await assert.rejects(
       scanWorkspace({ cwd, config, previousIndex: null, allowAutoIgnore: true }),
       /maxFilesPerSnapshot/,
     );
     const managed = await readManagedIgnore(config, cwd);
-    assert.equal(managed.entries.length, 0);
+    assert.equal(managed.entries.length, DEFAULT_MANAGED_IGNORES.length);
+    assert.ok(managed.entries.every((entry) => entry.source === 'default'));
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -282,7 +309,8 @@ test('手动管理插件忽略清单：添加、去重、删除', async () => {
     service.metaFor({ id: sessionId }).cwd = cwd;
 
     let info = await service.listManagedIgnore(sessionId);
-    assert.equal(info.entries.length, 0);
+    assert.equal(info.entries.length, DEFAULT_MANAGED_IGNORES.length);
+    assert.ok(info.entries.every((entry) => entry.source === 'default'));
     assert.ok(info.file.includes('ignore'));
     assert.equal((await stat(info.file)).isFile(), true);
 
@@ -290,10 +318,10 @@ test('手动管理插件忽略清单：添加、去重、删除', async () => {
     await service.addManagedIgnore(sessionId, { kind: 'path', value: 'a/.umi' });
     await service.addManagedIgnore(sessionId, { kind: 'pattern', value: '.tmp-*' });
     info = await service.listManagedIgnore(sessionId);
-    assert.equal(info.entries.length, 2);
-    assert.ok(info.entries.some((entry) => entry.kind === 'path' && entry.value === 'a/.umi'));
-    assert.ok(info.entries.some((entry) => entry.kind === 'pattern' && entry.value === '.tmp-*'));
-    assert.ok(info.entries.every((entry) => entry.source === 'manual'));
+    assert.equal(info.entries.length, DEFAULT_MANAGED_IGNORES.length + 2);
+    assert.ok(info.entries.some((entry) => entry.kind === 'path' && entry.value === 'a/.umi' && entry.source === 'manual'));
+    assert.ok(info.entries.some((entry) => entry.kind === 'pattern' && entry.value === '.tmp-*' && entry.source === 'manual'));
+    assert.equal(info.entries.filter((entry) => entry.source === 'default').length, DEFAULT_MANAGED_IGNORES.length);
 
     await assert.rejects(
       service.addManagedIgnore(sessionId, { kind: 'pattern', value: 'a/b' }),
@@ -301,8 +329,9 @@ test('手动管理插件忽略清单：添加、去重、删除', async () => {
     );
     await service.removeManagedIgnore(sessionId, { kind: 'path', value: 'a/.umi' });
     info = await service.listManagedIgnore(sessionId);
-    assert.equal(info.entries.length, 1);
-    assert.equal(info.entries[0].value, '.tmp-*');
+    assert.equal(info.entries.length, DEFAULT_MANAGED_IGNORES.length + 1);
+    assert.ok(info.entries.some((entry) => entry.value === '.tmp-*'));
+    assert.ok(!info.entries.some((entry) => entry.value === 'a/.umi'));
 
     await assert.rejects(
       service.removeManagedIgnore(sessionId, { kind: 'path', value: 'a/.umi' }),
