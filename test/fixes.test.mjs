@@ -54,11 +54,11 @@ test('快照时已存在的空目录不被删除，快照后新建的空目录�
   try {
     const service = new SnapshotService({ get: () => undefined }, { root }, logger);
     const session = { id: 's-emptydir', header: { cwd } };
-    await mkdir(join(cwd, 'logs'), { recursive: true });
+    await mkdir(join(cwd, 'empty-dir'), { recursive: true });
     await writeFile(join(cwd, 'a.txt'), 'a', 'utf8');
     const captured = await service.capture(session, 'manual', {});
-    // 目标快照里 logs 是已存在空目录；之后写入再删除文件，回滚不应把 logs 收掉。
-    await writeFile(join(cwd, 'logs', 'run.log'), 'temp', 'utf8');
+    // 目标快照里 empty-dir 是已存在空目录；之后写入再删除文件，回滚不应把它收掉。
+    await writeFile(join(cwd, 'empty-dir', 'run.txt'), 'temp', 'utf8');
     await mkdir(join(cwd, 'newempty'), { recursive: true });
     const preview = await service.preview(session.id, captured.record.id);
     const report = await service.restore({
@@ -69,11 +69,11 @@ test('快照时已存在的空目录不被删除，快照后新建的空目录�
       planToken: preview.planToken,
     });
     assert.equal(report.files.failed, 0);
-    assert.deepEqual(await readdir(join(cwd, 'logs')), []);
+    assert.deepEqual(await readdir(join(cwd, 'empty-dir')), []);
     await assert.rejects(readdir(join(cwd, 'newempty')), /ENOENT/);
 
     // 快照时点存在的空目录后来被删除，回滚会按 dirs 清单重新创建。
-    await rm(join(cwd, 'logs'), { recursive: true, force: true });
+    await rm(join(cwd, 'empty-dir'), { recursive: true, force: true });
     const preview2 = await service.preview(session.id, captured.record.id);
     const report2 = await service.restore({
       sessionId: session.id,
@@ -83,7 +83,7 @@ test('快照时已存在的空目录不被删除，快照后新建的空目录�
       planToken: preview2.planToken,
     });
     assert.equal(report2.files.failed, 0);
-    assert.deepEqual(await readdir(join(cwd, 'logs')), []);
+    assert.deepEqual(await readdir(join(cwd, 'empty-dir')), []);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
